@@ -80,6 +80,13 @@ async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=query.message.chat_id, text="Счетчик откатился")
     await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
 
+async def delete_message(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    try:
+        await context.bot.delete_message(chat_id=job.data["chat_id"], message_id=job.data["message_id"])
+    except:
+        pass
+
 async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_simulation_mode:
         return
@@ -92,7 +99,9 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=user_data["user_id"], text=f"+{counter}\nВыданный номер: {phone_number}", reply_to_message_id=user_data["photo_message_id"])
             await context.bot.send_message(chat_id=update.effective_user.id, text="Номер успешно поставлен!")
             cancel_message = await context.bot.send_message(chat_id=user_data["user_id"], text="Можно отменить в течение 10 минут:", reply_to_message_id=user_data["photo_message_id"], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌", callback_data=f"cancel_{user_data['photo_message_id']}")]]))
-            Timer(600, delete_message, args=(context.bot, cancel_message)).start()
+            
+            context.job_queue.run_once(delete_message, 600, data={"chat_id": user_data["user_id"], "message_id": cancel_message.message_id})
+
             try:
                 action_message_id = context.user_data.get("action_message_ids", {}).get(current_worker)
                 if action_message_id:
