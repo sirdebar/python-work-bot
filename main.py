@@ -1,7 +1,10 @@
 import logging
 from threading import Timer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes, ConversationHandler, JobQueue
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, 
+    ContextTypes, ConversationHandler, JobQueue
+)
 from config import ADMIN_ID, BOT_API_TOKEN
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -16,27 +19,27 @@ workers = {}
 current_worker = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Бот запущен!')
+    await update.message.reply_text('<b>Бот запущен!</b>', parse_mode='HTML')
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_running:
         return
     if bot_simulation_mode:
-        await update.message.reply_text("😔 На данный момент нет доступных WhatsApp для выдачи", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("<b>😔 На данный момент нет доступных WhatsApp для выдачи</b>", reply_to_message_id=update.message.message_id, parse_mode='HTML')
         return
     if not bot_simulation_mode and update.message.photo[-1].file_id in processed_photos:
         return
     if current_worker is not None:
         forwarded_message = await context.bot.forward_message(chat_id=current_worker, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
         await send_action_buttons(context, context.bot, current_worker, forwarded_message.message_id, update.message.chat_id, update.message.message_id)
-        await update.message.reply_text(f'⬆️ Сообщение было успешно взято в работу {workers[current_worker]}', reply_to_message_id=update.message.message_id)
+        await update.message.reply_text(f'<b>⬆️ Сообщение было успешно взято в работу {workers[current_worker]}</b>', reply_to_message_id=update.message.message_id, parse_mode='HTML')
     else:
-        await update.message.reply_text("Нет доступных пользователей для обработки заявки.")
+        await update.message.reply_text("<b>Нет доступных пользователей для обработки заявки.</b>", parse_mode='HTML')
 
 async def send_action_buttons(context, bot, chat_id, message_id, user_id, photo_message_id):
     keyboard = [[InlineKeyboardButton("Вотсап поставлен ✅", callback_data=f"set_{message_id}_{user_id}_{photo_message_id}")], [InlineKeyboardButton("Повтор", callback_data=f"repeat_{message_id}_{user_id}_{photo_message_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    action_message = await bot.send_message(chat_id=chat_id, text="Выберите действие:", reply_markup=reply_markup)
+    action_message = await bot.send_message(chat_id=chat_id, text="<b>Выберите действие:</b>", reply_markup=reply_markup, parse_mode='HTML')
     context.user_data.setdefault("action_message_ids", {}).update({user_id: action_message.message_id})
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,11 +61,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     if action == "set":
         context.user_data.update({"forwarded_message_id": forwarded_message_id, "user_id": user_id, "photo_message_id": photo_message_id})
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Пожалуйста, отправьте номер телефона:")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="<b>Пожалуйста, отправьте номер телефона:</b>", parse_mode='HTML')
         return GET_PHONE
     elif action == "repeat":
-        await context.bot.send_message(chat_id=user_id, text="❌ Повтор", reply_to_message_id=photo_message_id)
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Повтор запрошен.")
+        await context.bot.send_message(chat_id=user_id, text="<b>❌ Повтор</b>", reply_to_message_id=photo_message_id, parse_mode='HTML')
+        await context.bot.send_message(chat_id=query.message.chat_id, text="<b>Повтор запрошен.</b>", parse_mode='HTML')
     return ConversationHandler.END
 
 def delete_message(bot, message):
@@ -77,15 +80,23 @@ async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     _, photo_message_id = query.data.split('_')
     counter -= 1
-    await context.bot.send_message(chat_id=query.message.chat_id, text="Счетчик откатился")
-    await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
 
-async def delete_message(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    try:
-        await context.bot.delete_message(chat_id=job.data["chat_id"], message_id=job.data["message_id"])
-    except:
-        pass
+    job = context.job_queue.get_jobs_by_name(f"delete_{photo_message_id}")[0]
+    issued_phone_number = job.data["issued_phone_number"]  # Получаем выданный номер из данных задания
+    status = "Слетел" if job else "Успех"
+    message_text = f"<b>Номер: {issued_phone_number}\nСтатус: {status}</b>"
+    if status == "Слетел":
+        message_text += "\n<b>Ты еблан, подсунул хуйню.</b>"
+    else:
+        message_text += "\n<b>Спасибо что не подсунул хуйню.</b>"
+    
+    # Отправляем сообщение обработчику
+    await context.bot.send_message(chat_id=current_worker, text=message_text, parse_mode='HTML')
+
+    # Удаляем сообщение с кнопкой отмены и задание
+    await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+    job.schedule_removal()
+
 
 async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if bot_simulation_mode:
@@ -96,11 +107,13 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_data:
         counter += 1
         if current_worker:  
-            await context.bot.send_message(chat_id=user_data["user_id"], text=f"+{counter}\nВыданный номер: {phone_number}", reply_to_message_id=user_data["photo_message_id"])
-            await context.bot.send_message(chat_id=update.effective_user.id, text="Номер успешно поставлен!")
-            cancel_message = await context.bot.send_message(chat_id=user_data["user_id"], text="Можно отменить в течение 10 минут:", reply_to_message_id=user_data["photo_message_id"], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌", callback_data=f"cancel_{user_data['photo_message_id']}")]]))
-            
-            context.job_queue.run_once(delete_message, 600, data={"chat_id": user_data["user_id"], "message_id": cancel_message.message_id})
+            issued_phone_number = phone_number  # Сохраняем выданный номер в отдельной переменной
+            await context.bot.send_message(chat_id=user_data["user_id"], text=f"<b>+{counter}\nВыданный номер: {phone_number}</b>", reply_to_message_id=user_data["photo_message_id"], parse_mode='HTML')
+            await context.bot.send_message(chat_id=update.effective_user.id, text="<b>Номер успешно поставлен!</b>", parse_mode='HTML')
+            cancel_message = await context.bot.send_message(chat_id=user_data["user_id"], text="<b>Можно отменить в течение 10 минут:</b>", reply_to_message_id=user_data["photo_message_id"], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌", callback_data=f"cancel_{user_data['photo_message_id']}")]]), parse_mode='HTML')
+
+            # Передаем выданный номер в данные задания
+            context.job_queue.run_once(delete_message, 600, data={"chat_id": user_data["user_id"], "message_id": cancel_message.message_id, "issued_phone_number": issued_phone_number}, name=f"delete_{user_data['photo_message_id']}")
 
             try:
                 action_message_id = context.user_data.get("action_message_ids", {}).get(current_worker)
@@ -115,7 +128,7 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return ConversationHandler.END
     else:
-        await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
+        await update.message.reply_text("<b>Произошла ошибка. Попробуйте снова.</b>", parse_mode='HTML')
         return GET_PHONE
 
 # --- Административные команды ---
@@ -353,4 +366,3 @@ if __name__ == '__main__':
     main()
 
 # Made by Shvyaner :3
-
