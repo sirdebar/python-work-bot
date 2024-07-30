@@ -2,10 +2,11 @@ import logging
 from threading import Timer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, 
+    Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler,
     ContextTypes, ConversationHandler, JobQueue
 )
 from config import ADMIN_ID, BOT_API_TOKEN
+import database
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -15,7 +16,10 @@ GET_NEWS_INTERVAL = range(1)
 bot_running = True
 bot_simulation_mode = False
 processed_photos = set()
-workers = {}
+
+# Загружаем данные из БД при запуске
+ADMINS = database.load_admins()
+workers = database.load_workers()
 current_worker = None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -133,14 +137,16 @@ async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Административные команды ---
 async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ADMIN_ID:
+    global workers
+    if update.effective_user.id in ADMINS or update.effective_user.id == ADMIN_ID:
         try:
-            user_id = int(context.args[0])  # Преобразуем только ID в число
-            name = ' '.join(context.args[1:])  # Имя собираем из всех оставшихся аргументов
+            user_id = int(context.args[0])
+            name = ' '.join(context.args[1:])
             if name in workers.values():
                 await update.message.reply_text("Имя уже занято. Выберите другое имя.")
                 return
             workers[user_id] = name
+            database.add_worker(user_id, name)  # Добавляем в БД
             await update.message.reply_text(f"Пользователь {user_id} с именем {name} добавлен в список обработчиков.")
         except (IndexError, ValueError):
             await update.message.reply_text("Использование: /adduser <user_id> <name>")
@@ -149,11 +155,13 @@ async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ADMIN_ID:
+    global workers
+    if update.effective_user.id in ADMINS or update.effective_user.id == ADMIN_ID:
         try:
             user_id = int(context.args[0])
             if user_id in workers:
                 del workers[user_id]
+                database.remove_worker(user_id)  # Удаляем из БД
                 await update.message.reply_text(f"Пользователь {user_id} удален из списка обработчиков.")
             else:
                 await update.message.reply_text("Пользователь не найден в списке.")
@@ -161,6 +169,8 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Использование: /removeuser <user_id>")
     else:
         await update.message.reply_text("У вас нет прав для этой команды.")
+
+
 
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
@@ -312,6 +322,63 @@ async def stop_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Рассылка остановлена.")
 
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ADMINS
+    if update.effective_user.id == ADMIN_ID:
+        try:
+            user_id = int(context.args[0])
+            name = ' '.join(context.args[1:])  # Имя (необязательно)
+            if user_id in ADMINS:
+                await update.message.reply_text("Этот пользователь уже администратор.")
+                return
+            ADMINS[user_id] = name if name else None
+            database.add_admin(user_id, name)  # Добавляем в БД
+            await update.message.reply_text(f"Пользователь {user_id} добавлен в список администраторов.")
+        except (IndexError, ValueError):
+            await update.message.reply_text("Использование: /addadmin <user_id> [<name>]")
+    else:
+        await update.message.reply_text("У вас нет прав для этой команды.")
+
+
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ADMINS
+    if update.effective_user.id == ADMIN_ID:
+        try:
+            user_id = int(context.args[0])
+            if user_id in ADMINS:
+                del ADMINS[user_id]
+                database.remove_admin(user_id)  # Удаляем из БД
+                await update.message.reply_text(f"Пользователь {user_id} удален из списка администраторов.")
+            else:
+                await update.message.reply_text("Этот пользователь не является администратором.")
+        except (IndexError, ValueError):
+            await update.message.reply_text("Использование: /removeadmin <user_id>")
+    else:
+        await update.message.reply_text("У вас нет прав для этой команды.")
+
+
+async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ADMINS
+    if update.effective_user.id == ADMIN_ID:
+        if ADMINS:
+            admin_list = "\n".join([f"{user_id} - {name if name else 'Без имени'}" for user_id, name in ADMINS.items()])
+            await update.message.reply_text(f"Список администраторов:\n{admin_list}")
+        else:
+            await update.message.reply_text("Список администраторов пуст.")
+    else:
+        await update.message.reply_text("У вас нет прав для этой команды.")
+
+
+# --- Проверка прав для административных команд ---
+def restricted(func):
+    async def wrapped(update, context, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id not in ADMINS and user_id != ADMIN_ID:
+            await update.message.reply_text("У вас нет прав для этой команды.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapped
+
 def main():
     application = Application.builder().token(BOT_API_TOKEN).job_queue(JobQueue()).build()
 
@@ -340,6 +407,11 @@ def main():
 
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(cancel_button, pattern="cancel_"))
+
+    # Примеры команд, доступных только главному администратору (ADMIN_ID)
+    application.add_handler(CommandHandler("addadmin", add_admin))
+    application.add_handler(CommandHandler("removeadmin", remove_admin))
+    application.add_handler(CommandHandler("listadmins", list_admins))
 
     # Регистрация административных команд
     application.add_handler(CommandHandler("adduser", add_user))
